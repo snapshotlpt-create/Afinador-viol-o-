@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="pt-PT" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Afinador de Violão — Com Vibração</title>
+<!-- Carrega o Tailwind CSS para o design -->
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+/* Carrega a fonte Inter */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+body { font-family: 'Inter', sans-serif; }
+/* Estilos personalizados para a agulha e botões */
+.needle { transition: transform 0.12s ease-out; transform-origin: bottom center; }
+.guitar-note-target { background-color: #374151; transition: background-color 0.1s ease; }
+.play-btn { transition: transform .08s ease; }
+.play-btn:active { transform: scale(.95); }
+</style>
+</head>
+<body class="bg-gray-900 text-white h-full flex items-center justify-center antialiased">
+<div class="w-full max-w-3xl mx-auto p-4 text-center">
+
+<h1 class="text-3xl font-bold mb-4">Afinador Completo — 440 Hz</h1>
+
+<!-- Controles principais: Seleção de afinação e botões Start/Stop -->
+<div class="flex gap-2 justify-center mb-4">
+<select id="selectAfinacao" class="bg-gray-800 p-2 rounded-lg">
+<!-- Opções de afinação serão adicionadas por JS -->
+</select>
+<button id="startButton" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg">Iniciar</button>
+<button id="stopButton" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg hidden">Parar</button>
+</div>
+
+<!-- O ecrã principal do afinador, inicialmente escondido -->
+<div id="tunerDisplay" class="hidden">
+<!-- O medidor (agulha) -->
+<div class="relative w-full h-28 bg-gray-800 rounded-lg overflow-hidden mb-4">
+<!-- Linha verde central (alvo) -->
+<div class="absolute left-1/2 top-0 bottom-0 w-1 bg-green-500 transform -translate-x-1/2 z-10"></div>
+<!-- Agulha vermelha (indicador) -->
+<div id="needle" class="needle absolute bottom-0 left-1/2 w-1 h-full bg-red-500 transform -translate-x-1/2" style="transform: rotate(0deg) translateX(-50%);"></div>
+</div>
+
+<!-- O ecrã da nota -->
+<div class="bg-gray-800 p-6 rounded-lg mb-4">
+<div class="text-gray-400 text-sm uppercase">Nota</div>
+<div id="noteName" class="text-7xl font-black text-white">--</div>
+<div id="status" class="text-2xl font-bold text-gray-500 h-8">Toque uma nota</div>
+</div>
+
+<!-- A grelha de cordas (será preenchida por JS) -->
+<div id="stringsGrid" class="grid grid-cols-6 gap-2 mb-4"></div>
+
+<!-- Informação de frequência e cents -->
+<div class="flex justify-between text-lg">
+<div class="text-gray-400">Freq: <span id="frequency" class="font-bold text-white">-- Hz</span></div>
+<div class="text-gray-400">Cents: <span id="cents" class="font-bold text-white">--</span></div>
+</div>
+</div>
+
+<!-- Mensagens de erro (ex: falha ao aceder ao microfone) -->
+<div id="errorMessage" class="text-red-400 mt-4"></div>
+</div>
+
+<script>
+// ====== Configurações ======
+const A4 = 440; // Frequência de referência (Lá 4)
+const NOTAS_CROMATICAS = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+// Definição das afinações (Nome: {Nota: Frequência})
+const AFINACOES = {
+"Padrão (E A D G B E)": {"E2":82.41,"A2":110.00,"D3":146.83,"G3":196.00,"B3":246.94,"E4":329.63},
+"Drop D": {"D2":73.42,"A2":110.00,"D3":146.83,"G3":196.00,"B3":246.94,"E4":329.63},
+"DADGAD": {"D2":73.42,"A2":110.00,"D3":146.83,"G3":196.00,"A3":220.00,"D4":293.66},
+"Meio tom abaixo (Eb Ab Db Gb Bb Eb)": {"Eb2":77.78,"Ab2":103.83,"Db3":138.59,"Gb3":185.00,"Bb3":233.08,"Eb4":311.13}
+};
+
+// ====== Seletores da UI (para encontrar elementos no HTML) ======
+const selectAfinacao = document.getElementById('selectAfinacao');
+const startButton = document.getElementById('startButton');
+const stopButton = document.getElementById('stopButton');
+const tunerDisplay = document.getElementById('tunerDisplay');
+const noteNameEl = document.getElementById('noteName');
+const statusEl = document.getElementById('status');
+const needleEl = document.getElementById('needle');
+const frequencyEl = document.getElementById('frequency');
+const centsEl = document.getElementById('cents');
+const errorMessageEl = document.getElementById('errorMessage');
+const stringsGrid = document.getElementById('stringsGrid');
+
+// ====== Estado da Aplicação ======
+let audioContext, analyser, mediaStreamSource, sampleRate;
+let bufferLength, dataArray;
+let running = false; // O afinador está ligado?
+let refs = {}; // Frequências da afinação atual
+let playbackContext; // Contexto de áudio para tocar os sons de referência
+let estadoAfinacaoAnterior = ""; // Para rastrear o estado da vibração
+
+// ====== Funções Auxiliares (LocalStorage) ======
+// Guarda a afinação escolhida no navegador
+function carregarAfinacao() {
+    return localStorage.getItem('afinador_afinacao') || "Padrão (E A D G B E)";
+}
+
+function salvarAfinacao(nome) {
+    localStorage.setItem('afinador_afinacao', nome);
+}
+
+// ====== Funções da UI ======
+// Constrói a grelha de cordas com base na afinação
+function aplicarAfinacao(nome) {
+    refs = AFINACOES[nome];
+    stringsGrid.innerHTML = ''; // Limpa a grelha
+    
+    // Cria um "cartão" para cada corda
+    for (const [nota, freq] of Object.entries(refs)) {
+        const col = document.createElement('div');
+        col.id = `string-${nota}`;
+        col.className = 'p-2 bg-gray-700 rounded-lg font-bold flex flex-row items-center justify-between text-sm sm:text-base guitar-note-target';
+        
+        // Wrapper para o texto (Nome da nota e Freq)
+        const textWrap = document.createElement('div');
+        textWrap.className = 'text-left';
+        textWrap.innerHTML = `
+            <div class="text-lg sm:text-xl">${nota.replace(/[0-9]/g, '')}</div> 
+            <div class="text-xs font-normal text-gray-400">${freq.toFixed(2)} Hz</div>
+        `;
+        
+        // Botão de Play
+        const playButton = document.createElement('button');
+        playButton.className = 'play-btn p-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white';
+        playButton.innerHTML = `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11v11.78a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"></path></svg>`;
+        
+        // Adiciona evento ao botão de play
+        playButton.addEventListener('click', (e) => {
+            e.stopPropagation(); // Impede que o clique se propague
+            playTone(freq); // Toca o som de referência
+        });
+        
+        // Adiciona os elementos à coluna
+        col.appendChild(textWrap);
+        col.appendChild(playButton);
+        
+        stringsGrid.appendChild(col);
+    }
+}
+
+// Restaura a UI para o estado inicial
+function resetUI() {
+    noteNameEl.textContent = '--';
+    statusEl.textContent = 'Afinador parado';
+    statusEl.className = 'text-2xl font-bold text-gray-500 h-8';
+    frequencyEl.textContent = '-- Hz';
+    centsEl.textContent = '--';
+    needleEl.style.transform = 'rotate(0deg) translateX(-50%)';
+    estadoAfinacaoAnterior = ""; // Reseta estado da vibração
+    
+    // Reseta cores das cordas
+    document.querySelectorAll('.guitar-note-target').forEach(el => {
+        el.classList.remove('bg-green-600', 'bg-red-600', 'bg-blue-600');
+        el.classList.add('bg-gray-700');
+    });
+}
+
+// Atualiza a UI com a nota detetada (esta é chamada em loop)
+function atualizarUI(freq, notaInfo) {
+    let novoEstado; // Definir o estado atual
+
+    // Limpar destaques de cordas
+    document.querySelectorAll('.guitar-note-target').forEach(el => {
+        el.classList.remove('bg-green-600', 'bg-red-600', 'bg-blue-600');
+        el.classList.add('bg-gray-700');
+    });
+
+    // Se não houver som (silêncio)
+    if (!notaInfo || freq === 0) {
+        if (running) {
+           statusEl.textContent = 'Toque uma nota';
+           statusEl.className = 'text-2xl font-bold text-gray-500 h-8';
+           noteNameEl.textContent = '--';
+        }
+        novoEstado = "Silêncio";
+    
+    // Se houver som
+    } else {
+        const { nome, nomeCompleto, cents } = notaInfo;
+        
+        noteNameEl.textContent = nome;
+        frequencyEl.textContent = `${freq.toFixed(2)} Hz`;
+        centsEl.textContent = cents.toFixed(0);
+        
+        // Atualiza texto de estado E define o novoEstado
+        if (cents > 10) {
+            statusEl.textContent = 'Muito Alto';
+            statusEl.className = 'text-2xl font-bold text-red-500 h-8';
+            novoEstado = "Alto";
+        } else if (cents < -10) {
+            statusEl.textContent = 'Muito Baixo';
+            statusEl.className = 'text-2xl font-bold text-blue-500 h-8';
+            novoEstado = "Baixo";
+        } else {
+            statusEl.textContent = 'Afinado!';
+            statusEl.className = 'text-2xl font-bold text-green-500 h-8';
+            novoEstado = "Afinado";
+        }
+        
+        // Atualiza agulha (limita a +/- 45 graus)
+        const rotation = Math.max(-45, Math.min(45, cents));
+        needleEl.style.transform = `rotate(${rotation}deg) translateX(-50%)`;
+
+        // Destaca a corda correspondente
+        const targetEl = document.getElementById(`string-${nomeCompleto}`);
+        if (targetEl) {
+            targetEl.classList.remove('bg-gray-700');
+            if (Math.abs(cents) <= 10) {
+                targetEl.classList.add('bg-green-600'); // Verde se afinado
+            } else if (cents > 10) {
+                targetEl.classList.add('bg-red-600'); // Vermelho se alto
+            } else {
+                targetEl.classList.add('bg-blue-600'); // Azul se baixo
+            }
+        }
+    }
+
+    // --- LÓGICA PARA VIBRAR ---
+    // Vibra APENAS na transição para "Afinado"
+    if (novoEstado === "Afinado" && estadoAfinacaoAnterior !== "Afinado") {
+        vibrarSucesso();
+    }
+    // Atualiza o estado anterior no final
+    estadoAfinacaoAnterior = novoEstado;
+}
+
+
+// ====== Funções de Áudio ======
+// Pede acesso ao microfone e inicia o processo
+async function iniciarAfinador() {
+    errorMessageEl.textContent = '';
+    try {
+        // Pedir permissão ao utilizador
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        sampleRate = audioContext.sampleRate;
+        mediaStreamSource = audioContext.createMediaStreamSource(stream);
+        
+        // Configurar o Analisador
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 4096; // Tamanho maior para mais precisão em baixas frequências
+        bufferLength = analyser.fftSize;
+        dataArray = new Float32Array(bufferLength);
+
+        // Conectar o microfone ao analisador
+        mediaStreamSource.connect(analyser);
+        
+        // Atualizar UI dos botões
+        startButton.classList.add('hidden');
+        stopButton.classList.remove('hidden');
+        tunerDisplay.classList.remove('hidden');
+        
+        running = true;
+        loop(); // Inicia o loop de deteção
+    } catch (err) {
+        errorMessageEl.textContent = 'Não foi possível aceder ao microfone. Por favor, autorize o acesso.';
+        console.error(err);
+    }
+}
+
+// Para o afinador e liberta o microfone
+function pararAfinador() {
+    running = false;
+    if (mediaStreamSource) {
+        mediaStreamSource.mediaStream.getTracks().forEach(track => track.stop());
+    }
+    if (audioContext) {
+        audioContext.close();
+    }
+    // Atualiza UI dos botões
+    startButton.classList.remove('hidden');
+    stopButton.classList.add('hidden');
+    tunerDisplay.classList.add('hidden');
+    resetUI();
+}
+
+// Toca o som de referência da corda
+function playTone(freq) {
+    try {
+        if (!playbackContext || playbackContext.state === 'closed') {
+            playbackContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        
+        const oscillator = playbackContext.createOscillator();
+        const gainNode = playbackContext.createGain();
+        const now = playbackContext.currentTime;
+        
+        oscillator.type = 'triangle'; // Som mais suave que 'sine'
+        oscillator.frequency.setValueAtTime(freq, now);
+        
+        gainNode.connect(playbackContext.destination);
+        oscillator.connect(gainNode);
+        
+        // Fade-in e fade-out suaves para evitar 'cliques'
+        gainNode.gain.setValueAtTime(0, now);
+        gainNode.gain.linearRampToValueAtTime(0.3, now + 0.05);
+        gainNode.gain.linearRampToValueAtTime(0, now + 1.0); // Duração de 1 segundo
+        
+        oscillator.start(now);
+        oscillator.stop(now + 1.0);
+    } catch (err) {
+        console.error("Erro ao tocar o som:", err);
+        errorMessageEl.textContent = "Não foi possível tocar o som.";
+    }
+}
+
+// Faz o dispositivo vibrar quando uma nota está afinada
+function vibrarSucesso() {
+    // Verifica se a API de Vibração existe no navegador
+    if ('vibrate' in navigator) {
+        try {
+            navigator.vibrate(100); // Vibra por 100ms
+        } catch (err) {
+            console.error("Não foi possível vibrar:", err);
+        }
+    }
+}
+
+
+// O loop principal que corre continuamente
+function loop() {
+    if (!running) return; // Para o loop se o afinador for parado
+    requestAnimationFrame(loop); // Pede o próximo frame
+    
+    // Obtém os dados de áudio
+    analyser.getFloatTimeDomainData(dataArray); 
+    // Deteta a frequência
+    const freq = detectarPitch(dataArray, sampleRate);
+    
+    // Converte frequência para nota
+    const notaInfo = freq ? freqParaNota(freq) : null;
+    // Atualiza a UI
+    atualizarUI(freq || 0, notaInfo);
+}
+
+// ====== Lógica de Deteção de Pitch ======
+
+// Converte uma frequência (Hz) numa nota e cents
+function freqParaNota(freq) {
+    if (freq === 0) return null;
+    
+    // Fórmula: semitons = 12 * log2(f / A4)
+    const semitons = 12 * (Math.log(freq / A4) / Math.log(2));
+    const notaIndex = (Math.round(semitons) + 9 + 120) % 12; // +9 para A=9
+    const notaNome = NOTAS_CROMATICAS[notaIndex];
+    
+    // Calcular a oitava correta
+    const midiNote = Math.round(semitons) + 69; // A4 é a nota MIDI 69
+    const oitava = Math.floor(midiNote / 12) - 1;
+    const notaCompleta = notaNome + oitava;
+    
+    // Calcular os cents (diferença da nota perfeita)
+    const freqPerfeita = A4 * Math.pow(2, Math.round(semitons) / 12);
+    const cents = 1200 * (Math.log(freq / freqPerfeita) / Math.log(2));
+    
+    return {
+        nome: notaNome,
+        oitava: oitava,
+        nomeCompleto: notaCompleta,
+        cents: cents
+    };
+}
+
+// Algoritmo de Autocorrelação (ACF) para encontrar o pitch
+function detectarPitch(buffer, sampleRate) {
+    // 1. Calcular RMS (volume) para ignorar silêncio
+    let rms = 0;
+    for (let i = 0; i < buffer.length; i++) {
+        rms += buffer[i] * buffer[i];
+    }
+    rms = Math.sqrt(rms / buffer.length);
+    
+    if (rms < 0.015) return null; // Limite de silêncio (ignora ruído de fundo)
+
+    // 2. Definir limites (frequências de guitarra)
+    const minSamples = Math.floor(sampleRate / 330); // E4 (corda mais aguda)
+    const maxSamples = Math.ceil(sampleRate / 70);  // ~C2 (abaixo do E2 grave)
+    
+    let correlations = new Float32Array(maxSamples);
+    let globalMaxCorr = 0;
+
+    // 3. Calcular autocorrelação para encontrar picos
+    for (let offset = minSamples; offset < maxSamples; offset++) {
+        let corr = 0;
+        for (let i = 0; i < buffer.length - offset; i++) {
+            corr += buffer[i] * buffer[i + offset];
+        }
+        correlations[offset] = corr;
+        if (corr > globalMaxCorr) {
+            globalMaxCorr = corr;
+        }
+    }
+    
+    // 4. Encontrar o primeiro pico que seja "bom o suficiente"
+    const threshold = globalMaxCorr * 0.9; 
+    
+    for (let offset = minSamples; offset < maxSamples; offset++) {
+        const corr = correlations[offset];
+        
+        // É um pico (maior que os vizinhos) e está acima do threshold?
+        if (corr > threshold && 
+            corr > (correlations[offset-1] || 0) && 
+            corr > (correlations[offset+1] || 0)) 
+        {
+            // 5. Interpolação parabólica para precisão sub-amostra
+            const y1 = correlations[offset - 1];
+            const y2 = correlations[offset];
+            const y3 = correlations[offset + 1];
+            
+            const d = (y3 - y1) / (2 * (2 * y2 - y1 - y3));
+            const refinedOffset = offset + d;
+            
+            return sampleRate / refinedOffset;
+        }
+    }
+    
+    return null; // Nenhum pitch claro detetado
+}
+
+// ====== Inicialização (Corre quando a página carrega) ======
+let afinacaoAtual = carregarAfinacao();
+selectAfinacao.value = afinacaoAtual;
+
+// Popular o select com as afinações
+for (const nome of Object.keys(AFINACOES)) {
+    const opt = document.createElement('option');
+    opt.value = nome;
+    opt.textContent = nome;
+    selectAfinacao.appendChild(opt);
+}
+selectAfinacao.value = afinacaoAtual; // Definir valor após popular
+
+// Adicionar eventos
+selectAfinacao.addEventListener('change', () => {
+    salvarAfinacao(selectAfinacao.value);
+    aplicarAfinacao(selectAfinacao.value);
+});
+
+startButton.addEventListener('click', iniciarAfinador);
+stopButton.addEventListener('click', pararAfinador);
+
+// Configurar UI inicial
+aplicarAfinacao(afinacaoAtual);
+resetUI();
+
+</script>
+</body>
+</html>
+
+
